@@ -5,7 +5,7 @@ import json
 import pathlib
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import matplotlib.pyplot as plt
@@ -29,6 +29,7 @@ class Event:
     name: str
     start: datetime
     finish: datetime
+    hash_: int
 
     start_seconds: float = 0
     finish_seconds: float = 0
@@ -45,6 +46,7 @@ class Event:
             ),  # Event IDs are not unique and contain garbage
             start=datetime.fromisoformat(data["start"]),
             finish=datetime.fromisoformat(data["finish"]),
+            hash_=hash(data["id"]) ^ hash(data["start"]) ^ hash(data["finish"]),
         )
 
     def copy(self) -> "Event":
@@ -53,15 +55,23 @@ class Event:
             self.name,
             self.start,
             self.finish,
+            self.hash_,
             self.start_seconds,
             self.finish_seconds,
             self.slot,
         )
 
 
-def _read_events(callback_log_path: pathlib.Path) -> list[Event]:
+def _read_events(callback_log_path: pathlib.Path) -> list[list[Event]]:
     """Read events from a callback log file."""
-    events = []
+    logs: list[list[Event]] = []
+    events: list[Event] = []
+    new_log_file = True
+
+    # set of already seen hashes
+    seen = set()
+    dropped = 0
+
     with open(callback_log_path, "r", encoding="utf-8") as file:
         for line in file:
             try:
@@ -70,8 +80,21 @@ def _read_events(callback_log_path: pathlib.Path) -> list[Event]:
                 continue
             event = Event.from_dict(data)
             if event is not None:
+                if new_log_file:
+                    events = []
+                    logs.append(events)
+                    new_log_file = False
+                if event.hash_ in seen:
+                    dropped += 1
+                    continue
+                seen.add(event.hash_)
                 events.append(event)
-    return events
+            else:
+                new_log_file = True
+
+    if dropped > 0:
+        print(f"Warning: Dropped {dropped} duplicate events.")
+    return logs
 
 
 def _events_get_range(events: list[Event]) -> tuple[datetime, datetime]:
@@ -91,54 +114,6 @@ def _events_normalize(events: list[Event], reference_time: datetime) -> None:
 def _events_sorted(events: list[Event]) -> list[Event]:
     """Sort events by start time."""
     return sorted(events, key=lambda x: x.start_seconds)
-
-
-def _events_merge(events: list[Event], allowed_overlap: int) -> list[Event]:
-    """Merge events that are too close together."""
-    # clone the list to avoid modifying it while iterating
-    events = [event.copy() for event in events]
-
-    events_merged: list[Event] = []
-
-    for event in events:
-        if not events_merged:
-            events_merged.append(event)
-            continue
-
-        last_event = events_merged[-1]
-        if last_event.finish_seconds + allowed_overlap >= event.start_seconds:
-            last_event.finish_seconds = event.finish_seconds
-        else:
-            events_merged.append(event)
-
-    return events_merged
-
-
-def _events_collapse_gaps(
-    events: list[Event], min_gap_size: int, allowed_overlap: int
-) -> None:
-    """Collapse gaps bigger than min_gap_size where no event is active."""
-    events_merged = _events_merge(events, allowed_overlap)
-    collapse: list[tuple[float, float]] = []
-
-    gap_position_cumulative: float = 0
-    for idx, event in enumerate(events_merged):
-        if idx == 0:
-            continue
-
-        last_event = events_merged[idx - 1]
-        gap_size = event.start_seconds - last_event.finish_seconds
-        if gap_size >= min_gap_size:
-            gap_position = last_event.finish_seconds - gap_position_cumulative
-            gap_position_cumulative += gap_size
-
-            collapse.append((gap_position, gap_size))
-
-    for gap_position, gap_size in collapse:
-        for event in events:
-            if event.start_seconds >= gap_position:
-                event.start_seconds -= gap_size
-                event.finish_seconds -= gap_size
 
 
 def _events_calculate_slots(events: list[Event], allowed_overlap: int) -> None:
@@ -248,13 +223,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Minimum percentage of the total timeline duration "
         "for an event to be labeled. Default: 0.01",
     )
+    # Flag: collapse if there are multiple callback logs (e.g. from multiple runs)
     parser.add_argument(
-        "--collapse-gap-size-minutes",
-        type=float,
-        default=-1,
-        help="Collapse gaps bigger than this (could be useful for e.g. "
-        "re-run after timeout). If set to a positive number, gaps "
-        "bigger than this size will be collapsed. Default: -1",
+        "--collapse",
+        action="store_true",
+        help="Collapse gaps between multiple callback logs (e.g. from multiple-runs).",
     )
     return parser
 
@@ -266,22 +239,48 @@ def main() -> None:
     output_path: pathlib.Path | None = args.output
     allowed_overlap: int = args.overlap
     label_min_percent: float = args.label_min_percent
-    collapse_gap_size_minutes: float = args.collapse_gap_size_minutes
+    collapse: bool = args.collapse
 
-    events = _read_events(callback_log_path)
+    logs = _read_events(callback_log_path)
+
+    if not collapse:
+        # concatenate all logs without timestamp adjustment
+        events = [event for log in logs for event in log]
+    else:
+        # concatenate all logs and adjust timestamps
+        events = []
+        subtracted_time: timedelta = timedelta(0)
+        last_end_last: Optional[datetime] = None
+        for log in logs:
+            if len(log) == 0:
+                continue
+            first_start_current, last_end_current = _events_get_range(log)
+
+            if last_end_last is not None and first_start_current > last_end_last:
+                subtracted_time += first_start_current - last_end_last
+
+            last_end_last = last_end_current
+
+            for event in log:
+                event = event.copy()
+                event.start -= subtracted_time
+                event.finish -= subtracted_time
+                events.append(event)
 
     if len(events) == 0:
         print("No events found in the log file.")
         sys.exit(1)
-    print(f"Read {len(events)} events from the log file.")
+    if len(logs) > 1:
+        print(
+            f"Read {len(events)} events in {len(logs)} separate logs "
+            f"from the file (use --collapse to close gaps)."
+        )
+    else:
+        print(f"Read {len(events)} events from the file.")
 
     first_start, last_end = _events_get_range(events)
     _events_normalize(events, reference_time=first_start)
     events = _events_sorted(events)
-    if collapse_gap_size_minutes >= 0:
-        _events_collapse_gaps(
-            events, int(collapse_gap_size_minutes * 60), allowed_overlap
-        )
     _events_calculate_slots(events, allowed_overlap)
     _events_plot(
         events,
