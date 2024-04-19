@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "app-name"
+name = "callback_plot"
 version = "0.1.0"
-description = "A beautiful description."
-authors = ["Reinder Vos de Wael <reinder.vosdewael@childmind.org>"]
+description = "Plot CPAC/Nipype callback.log files"
+authors = ["Florian Rupprecht <33600480+nx10@users.noreply.github.com>"]
 license = "LGPL-2.1"
 readme = "README.md"
-packages = [{include = "APP_NAME", from = "src"}]
+packages = [{include = "callback_plot", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "~3.11"
