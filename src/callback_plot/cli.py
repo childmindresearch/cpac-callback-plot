@@ -47,6 +47,17 @@ class Event:
             finish=datetime.fromisoformat(data["finish"]),
         )
 
+    def copy(self) -> "Event":
+        """Create a copy of the event."""
+        return Event(
+            self.name,
+            self.start,
+            self.finish,
+            self.start_seconds,
+            self.finish_seconds,
+            self.slot,
+        )
+
 
 def _read_events(callback_log_path: pathlib.Path) -> list[Event]:
     """Read events from a callback log file."""
@@ -80,6 +91,54 @@ def _events_normalize(events: list[Event], reference_time: datetime) -> None:
 def _events_sorted(events: list[Event]) -> list[Event]:
     """Sort events by start time."""
     return sorted(events, key=lambda x: x.start_seconds)
+
+
+def _events_merge(events: list[Event], allowed_overlap: int) -> list[Event]:
+    """Merge events that are too close together."""
+    # clone the list to avoid modifying it while iterating
+    events = [event.copy() for event in events]
+
+    events_merged: list[Event] = []
+
+    for event in events:
+        if not events_merged:
+            events_merged.append(event)
+            continue
+
+        last_event = events_merged[-1]
+        if last_event.finish_seconds + allowed_overlap >= event.start_seconds:
+            last_event.finish_seconds = event.finish_seconds
+        else:
+            events_merged.append(event)
+
+    return events_merged
+
+
+def _events_collapse_gaps(
+    events: list[Event], min_gap_size: int, allowed_overlap: int
+) -> None:
+    """Collapse gaps bigger than min_gap_size where no event is active."""
+    events_merged = _events_merge(events, allowed_overlap)
+    collapse: list[tuple[float, float]] = []
+
+    gap_position_cumulative: float = 0
+    for idx, event in enumerate(events_merged):
+        if idx == 0:
+            continue
+
+        last_event = events_merged[idx - 1]
+        gap_size = event.start_seconds - last_event.finish_seconds
+        if gap_size >= min_gap_size:
+            gap_position = last_event.finish_seconds - gap_position_cumulative
+            gap_position_cumulative += gap_size
+
+            collapse.append((gap_position, gap_size))
+
+    for gap_position, gap_size in collapse:
+        for event in events:
+            if event.start_seconds >= gap_position:
+                event.start_seconds -= gap_size
+                event.finish_seconds -= gap_size
 
 
 def _events_calculate_slots(events: list[Event], allowed_overlap: int) -> None:
@@ -189,6 +248,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Minimum percentage of the total timeline duration "
         "for an event to be labeled. Default: 0.01",
     )
+    parser.add_argument(
+        "--collapse-gap-size-minutes",
+        type=float,
+        default=-1,
+        help="Collapse gaps bigger than this (could be useful for e.g. "
+        "re-run after timeout). If set to a positive number, gaps "
+        "bigger than this size will be collapsed. Default: -1",
+    )
     return parser
 
 
@@ -199,6 +266,7 @@ def main() -> None:
     output_path: pathlib.Path | None = args.output
     allowed_overlap: int = args.overlap
     label_min_percent: float = args.label_min_percent
+    collapse_gap_size_minutes: float = args.collapse_gap_size_minutes
 
     events = _read_events(callback_log_path)
 
@@ -210,6 +278,10 @@ def main() -> None:
     first_start, last_end = _events_get_range(events)
     _events_normalize(events, reference_time=first_start)
     events = _events_sorted(events)
+    if collapse_gap_size_minutes >= 0:
+        _events_collapse_gaps(
+            events, int(collapse_gap_size_minutes * 60), allowed_overlap
+        )
     _events_calculate_slots(events, allowed_overlap)
     _events_plot(
         events,
