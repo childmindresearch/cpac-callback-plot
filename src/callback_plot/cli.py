@@ -159,6 +159,8 @@ def _events_plot(
     # minutes -> HH:MM format
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: _minutes_to_hhmm(x)))
 
+    ax.invert_yaxis()
+
     plt.tight_layout()
 
 
