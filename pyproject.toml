@@ -9,8 +9,8 @@ packages = [{include = "callback_plot", from = "src"}]
 
 [tool.poetry.dependencies]
 python = "~3.11"
-numpy = "^1.26.4"
-matplotlib = "^3.8.4"
+numpy = "^2.0.1"
+matplotlib = "^3.9.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.1"
